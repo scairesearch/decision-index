@@ -87,6 +87,37 @@ class KieveEngine(Engine):
         # Checkpoints trained with the enhanced operator stack need it rebuilt
         # too: the operator parameters have different names.
         enhanced = any("scale_weights" in k for k in state)
+        # Rebuild the non-backbone architecture from the checkpoint's own
+        # tensors and the training config: the scorer (cross-attention vs
+        # energy vs MoE), the evolving decision agent, the async graph
+        # operator and the fractal tiling/procedural branches.  The published
+        # config carries the relevant params; the state dict is the ground
+        # truth when a config was stripped for inference.
+        moe = bool(p.get("use_moe", False)) or \
+            any(k.startswith("scorer.experts.") or k.startswith("scorer.router.") for k in state)
+        energy = bool(p.get("use_energy", False)) or \
+            (not moe and any(k.startswith("scorer.g.") or k.startswith("scorer.W") for k in state))
+        mc.use_moe = moe
+        mc.moe_experts = int(p.get("moe_experts", 4))
+        mc.moe_top_k = int(p.get("moe_top_k", 2))
+        mc.use_energy = energy
+        mc.energy_scale = float(p.get("energy_scale", 4.0))
+        mc.energy_langevin = bool(p.get("energy_langevin", False))
+        mc.energy_langevin_steps = int(p.get("energy_langevin_steps", 3))
+        mc.async_geo = bool(p.get("async_geo", False)) or \
+            any(k.startswith("state_encoder.gnp.gnp.") for k in state)
+        mc.gate_sources = getattr(mc, "gate_sources", 5)
+        mc.field_refine_steps = int(p.get("field_refine_steps", getattr(mc, "field_refine_steps", 0)))
+        mc.field_refine_lr = float(p.get("field_refine_lr", 0.05))
+        mc.field_refine_noise = float(p.get("field_refine_noise", 0.01))
+        ops = str(p.get("ops", getattr(mc, "ops", "fno+gnp")))
+        mc.ops = ops
+        mc.tiling_depth = int(p.get("tiling_depth", 2))
+        mc.tiling_hilbert = bool(p.get("tiling_hilbert", True))
+        mc.procedural = bool(p.get("procedural", False))
+        mc.procedural_kind = str(p.get("procedural_kind", "perlin"))
+        agent = bool(p.get("agent", False)) or \
+            any(k.startswith("agent.") for k in state)
         # LoRA-adapted checkpoints store the backbone weights inside the
         # adapter wrapper, so the encoder has to be wrapped the same way.
         lora_rank = int(p.get("lora_rank", 0) or 0)
@@ -94,7 +125,8 @@ class KieveEngine(Engine):
                                  use_ops=bool(fixed.get("use_ops", True)),
                                  lora_rank=lora_rank,
                                  lora_scale=float(p.get("lora_scale", 10.0)),
-                                 enhanced=enhanced)
+                                 enhanced=enhanced,
+                                 agent=agent)
         missing, unexpected = self.model.load_state_dict(state, strict=False)
         if missing or unexpected:
             print(f"kieve engine: loaded with {len(missing)} missing and "
